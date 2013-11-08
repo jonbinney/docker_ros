@@ -1,0 +1,49 @@
+INPUT: getPid ('/rostopic',)
+
+INPUT: registerPublisher ('/rostopic_21736_1383948385266', '/rosout', 'rosgraph_msgs/Log', 'http://h:53834/')
+
+INPUT: getParam ('/rostopic_21736_1383948385266', '/use_sim_time')
+
+INPUT: registerSubscriber ('/rostopic_21736_1383948385266', '/clock', 'rosgraph_msgs/Clock', 'http://h:53834/')
+
+INPUT: registerService ('/rostopic_21736_1383948385266', '/rostopic_21736_1383948385266/get_loggers', 'rosrpc://h:59140', 'http://h:53834/')
+
+INPUT: registerService ('/rostopic_21736_1383948385266', '/rostopic_21736_1383948385266/set_logger_level', 'rosrpc://h:59140', 'http://h:53834/')
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: getParam ('/rostopic_21736_1383948385266', '/tcp_keepalive')
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: getTopicTypes ('/rostopic',)
+
+INPUT: unregisterSubscriber ['/rostopic_21736_1383948385266', '/clock', 'http://h:53834/']
+
+INPUT: unregisterPublisher ['/rostopic_21736_1383948385266', '/rosout', 'http://h:53834/']
+
+INPUT: unregisterService ['/rostopic_21736_1383948385266', '/rostopic_21736_1383948385266/get_loggers', 'rosrpc://h:59140']
+
+INPUT: unregisterService ['/rostopic_21736_1383948385266', '/rostopic_21736_1383948385266/set_logger_level', 'rosrpc://h:59140']
