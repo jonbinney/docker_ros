@@ -11,9 +11,15 @@ class FakeMaster:
         # connect to the real ROS master
         self._real_master_proxy = xmlrpclib.ServerProxy(real_master_uri)
 
+        # map from private ports to public (host) ports
+        self._reroutings = {}
+
     def _dispatch(self, func_name, func_args):
         print ''
         print 'INPUT:', func_name, func_args
+
+        if func_name == 'registerPublisher':
+            
 
         # just forward this to the real ros master
         result = getattr(self._real_master_proxy, func_name)(*func_args)
@@ -24,7 +30,7 @@ class FakeMaster:
 fake_master_port = int(sys.argv[1])
 real_master_uri = sys.argv[2]
 
-server = SimpleXMLRPCServer(('localhost', fake_master_port), logRequests=False)
+server = SimpleXMLRPCServer(('0.0.0.0', fake_master_port), logRequests=False)
 server.register_introspection_functions()
 server.register_multicall_functions()
 server.register_instance(FakeMaster(real_master_uri))
