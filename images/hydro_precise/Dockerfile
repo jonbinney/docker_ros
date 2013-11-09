@@ -22,9 +22,8 @@ RUN apt-get install -y tmux git openssh-server
 RUN echo "root:root"|chpasswd
 
 # start ssh
-RUN mkdir -p /var/run/sshd
-CMD /usr/sbin/sshd
+# RUN mkdir -p /var/run/sshd
+# CMD /usr/sbin/sshd
 
-ADD . /src
-
-CMD /src/rostopic
+ADD . /
+ENTRYPOINT ["/ros"]
