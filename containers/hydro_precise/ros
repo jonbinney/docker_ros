@@ -1,0 +1,9 @@
+#!/bin/sh
+
+COMMAND=$@
+
+# the ROS setup.sh gets confused by arguments, so we clear them
+set --
+
+. /opt/ros/hydro/setup.sh
+$COMMAND
