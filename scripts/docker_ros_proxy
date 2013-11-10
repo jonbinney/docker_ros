@@ -1,37 +1,177 @@
 #!/usr/bin/env python
-import sys, os
+import sys, os, re, subprocess, yaml
 import xmlrpclib
 from SimpleXMLRPCServer import SimpleXMLRPCServer
 from SimpleXMLRPCServer import SimpleXMLRPCRequestHandler
 
-class FakeMaster:
-    SUCCESS = 1
+class MasterProxy:
+    def __init__(self, real_master_uri, host_ip, port0=61234):
+        '''
+        Sits between containerized ROS nodes and the ROS master, and does magic
+        rerouting of URIs to make everything work.
 
-    def __init__(self, real_master_uri):
+        ROS nodes within Docker containers open up ports which are only visible to
+        other processes inside of that container. Since these ports are not known
+        beforehand, we can't statically expose them. Instead, we have to intercept
+        the xmlrpc calls that these nodes make to the ROS master, change the URI
+        that they provide to one on the hos, use iptables to connect the chosen host
+        URI to the URI in the container, and then forward the modified xmlrpc call
+        on to the real ROS master.
+
+        At the moment, doesn't check check whether a host port is in use before
+        creating the iptables rule to forward it to a docker container. This
+        is wrong, but easy.
+
+        Args:
+            real_master_uri (str) - ROS_MASTER_URI for the actual ROS master.
+            host_ip (str) - Host IP address to use. (ROS_HOSTNAME, basically)
+            port0 (int) - start of port range to use when picking host ports to
+              forward into the containers.
+        '''
+        self._real_master_uri = real_master_uri
+        self._host_ip = host_ip
+        self._last_host_port_used = port0
+
         # connect to the real ROS master
-        self._real_master_proxy = xmlrpclib.ServerProxy(real_master_uri)
+        self._real_master_proxy = xmlrpclib.ServerProxy(self._real_master_uri)
 
-        # map from private ports to public (host) ports
+        # map from (container_id, private_port) to public (host) ports
         self._reroutings = {}
 
     def _dispatch(self, func_name, func_args):
+        '''
+        Method called by SimpleXMLRPCServer whenever someone makes an RPC call to us.
+
+        Passes these RPC calls on to the ROS master after doing any necessary rerouting
+        so that only URIs which can be seen on the host are used.
+        '''
         print ''
-        print 'INPUT:', func_name, func_args
+        print 'Input: %s%s' % (func_name, func_args)
 
-        if func_name == 'registerPublisher':
+        try:
+            # lookup the function in the real master RPC proxy
+            real_master_func = getattr(self._real_master_proxy, func_name)
+
+            # reroute URIs which are inside containers, and add any needed iptables rules so
+            # that the remapped URIs get to the right place
+            if func_name == 'registerPublisher':
+                (caller_id, topic, topic_type, caller_api) = func_args
+                func_args = (caller_id, topic, topic_type, self._reroute(caller_api))
+            elif func_name == 'registerService':
+                (caller_id, service, service_api, caller_api) = func_args
+                func_args = (caller_id, service, self._reroute(service_api), self._reroute(caller_api))
+            elif func_name == 'registerSubscriber':
+                (caller_id, topic, topic_type, caller_api) = func_args
+                func_args = (caller_id, topic, topic_type, self._reroute(caller_api))
+            elif func_name == 'unregisterSubscriber':
+                (caller_id, topic, caller_api) = func_args
+                func_args = (caller_id, topic, self._reroute(caller_api))
+            elif func_name == 'unregisterPublisher':
+                (caller_id, topic, caller_api) = func_args
+                func_args = (caller_id, topic, self._reroute(caller_api))
+            elif func_name == 'unregisterService':
+                (caller_id, service, service_api) = func_args
+                func_args = (caller_id, service, self._reroute(service_api))
+
+            # just forward this to the real ros master. some calls, like getParam, don't have
+            # any caller_api, and so can be passed straight through
+            result = real_master_func(*func_args)
+        except Exception as e:
+            print 'ERROR: %s' % str(e)
+            raise
+
+        print 'Fixed input: %s%s' % (func_name, func_args)
             
-
-        # just forward this to the real ros master
-        result = getattr(self._real_master_proxy, func_name)(*func_args)
         #print 'OUTPUT', result
         return result
 
+    def _reroute(self, private_caller_api):
+        '''
+        Convert a URI which is valid only within a container to one on the host which is routed
+        into the container, creating the routig using iptables first if needed.
+        
+        Args:
+            private_caller_api (str) - private (inside a container) URI of an xmlrpc server
 
+        Returns:
+            host_caller_api (str) - URI on the host which we have told iptables to reroute into
+              the xmlrpc server inside the container
+        '''
+        
+        # find out which docker container the calling node is in (same as hostname)
+        m = re.match(r'(.+)://(.+):([0-9]+)', private_caller_api)
+        api_proto, container_id, private_port = m.groups()
+        private_port = int(private_port)
+
+        # lookup the IP address of the container
+        inspect_output = subprocess.check_output(['docker', 'inspect', container_id])
+        inspect_yaml = yaml.load(inspect_output)
+        
+        container_ip = inspect_yaml[0]['NetworkSettings']['IPAddress']
+
+        # find/create a port on the host machine which forwards to this caller_api
+        if (container_id, private_port) in self._reroutings:
+            host_port = self._reroutings[(container_id, private_port)]
+        else:
+            host_port = self._iptables_forward_port(container_ip, private_port, 'tcp')
+            self._reroutings[(container_id, private_port)] = host_port
+
+        public_caller_api = '%s://%s:%d' % (api_proto, self._host_ip, host_port)
+        return public_caller_api
+
+    def _iptables_forward_port(self, private_host, private_port, protocol):
+        '''
+        Chooses a port on the host machine, and creates an iptables forwarding rule forwarding
+        that port to the specified private port.
+
+        Doesn't make sure that the host port it is using is actually available.
+
+        Args:
+            private_host (str): Hostname of Docker container.
+            private_port (int): Port on the docker container.
+            protocol (str): Protocol to forward (only 'tcp' for now)
+
+        Returns:
+            (int) port used on the host.
+        '''
+        # Note: The iptables produced by docker itself for forwarding seem to be completely broken!
+        # Forwarding (appears) to be done instead using a proxy:
+        #     https://github.com/dotcloud/docker/blob/master/proxy/tcp_proxy.go
+        #
+        # So everything gets copied through userspace...? Seems like a really bad idea. Some
+        # discussion here: https://github.com/dotcloud/docker/issues/2598
+        # We'll use iptables here instead of trying to use the docker proxy.
+        #
+        # Also, we're using the existing DOCKER chain here, since I'm to lazy to setup a new
+        # one. Should fix that at some point.
+        self._last_host_port_used += 1
+        host_port = self._last_host_port_used
+        cmd = ['iptables', '-t', 'nat', '-A', 'DOCKER', '-p', 'tcp', '-d', '0.0.0.0/0',
+               '--dport', '%d' % host_port, '-j', 'DNAT', '--to-destination',
+               '%s:%d' % (private_host, private_port)]
+        try:
+            subprocess.check_call(cmd)
+        except subprocess.CalledProcessError as e:
+            print 'ERROR: Command failed: %s' % str(cmd)
+            raise
+
+        return host_port
+
+class SlaveProxy:
+    def __init__(self, public_caller_api, private_caller_api):
+        self._public_caller_api = public_caller_api
+        self._private_caller_api = private_caller_api
+
+    def _dispatch(self, func_name, func_args):
+        pass
+
+    
 fake_master_port = int(sys.argv[1])
 real_master_uri = sys.argv[2]
+host_ip = sys.argv[3]
 
 server = SimpleXMLRPCServer(('0.0.0.0', fake_master_port), logRequests=False)
 server.register_introspection_functions()
 server.register_multicall_functions()
-server.register_instance(FakeMaster(real_master_uri))
+server.register_instance(MasterProxy(real_master_uri, host_ip))
 server.serve_forever()

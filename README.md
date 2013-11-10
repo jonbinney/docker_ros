@@ -1,5 +1,12 @@
 # docker_ros
 
+### Installation
+
+Install dependencies
+```bash
+sudo apt-get install python-yaml
+```
+
 ### Building the ROS Docker images
 
 ```
