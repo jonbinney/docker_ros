@@ -4,8 +4,10 @@ import xmlrpclib
 from SimpleXMLRPCServer import SimpleXMLRPCServer
 from SimpleXMLRPCServer import SimpleXMLRPCRequestHandler
 
-# in the ROS xmlrpc protocol, 1 means success
-SUCCESS = 1
+# status codes in ROS master/slave API
+ROS_ERROR = -1
+ROS_FAILURE = 0
+ROS_SUCCESS = 1
 
 class Rerouter:
     def __init__(self):
@@ -89,7 +91,7 @@ class MasterProxy:
             real_master_uri (str) - ROS_MASTER_URI for the actual ROS master.
         '''
         self._ros_hostname = ros_hostname
-        self._proxy_host_por t= proxy_host_port
+        self._proxy_host_port= proxy_host_port
         self._real_master_uri = real_master_uri
 
         # does the actual port forwarding for us
@@ -104,7 +106,6 @@ class MasterProxy:
         self._server.register_introspection_functions()
         self._server.register_multicall_functions()
         self._server.register_instance(MasterProxy(real_master_uri, host_ip))
-
 
     def _dispatch(self, func_name, func_args):
         '''
@@ -144,14 +145,11 @@ class MasterProxy:
             # just forward this to the real ros master. some calls, like getParam, don't have
             # any caller_api, and so can be passed straight through
             result = real_master_func(*func_args)
+            print 'Fixed input: %s%s' % (func_name, func_args)
+            return result
         except Exception as e:
             print 'ERROR: %s' % str(e)
             raise
-
-        print 'Fixed input: %s%s' % (func_name, func_args)
-            
-        #print 'OUTPUT', result
-        return result
 
     def _fix_caller_api(self, private_caller_api):
         '''
@@ -176,22 +174,20 @@ class MasterProxy:
         inspect_yaml = yaml.load(inspect_output)
         container_ip = inspect_yaml[0]['NetworkSettings']['IPAddress']
 
-        # find/create a port on the host machine which forwards to this caller_api.
-        # this just returns the port if it's already been forwarded
-        host_port = self._rerouter(container_ip, private_port, 'tcp')
-
         # if this is the first time we've heard from this node, create a slave proxy for it
-        # TODO: Ought to destroy these when the ROS node shuts down
-        slave_proxy = SlaveProxy(self._ros_hostname, private_caller_api, self._real_master_uri)
+        # TODO: Ought to destroy these when the ROS node shuts down. also, container_id, port
+        # isn't guaranteed to be unique if nodes are killed and other nodes launched (port
+        # could be reused)
         if not (container_id, private_port) in self._slave_proxies:
+            slave_proxy = SlaveProxy(self._ros_hostname, private_caller_api, self._real_master_uri)
             self._slave_proxies[(container_id, private_port)] = slave_proxy
+            slave_proxy.start()
 
         # return the URI for the new slave proxy. it will forward rpc calls to the containerized node,
         # modifying them as needed and forwarding ports for publications.
         public_caller_api = '%s://%s:%d' % (api_proto, self._host_ip, slave_proxy.proxy_xmlrpc_server_port)
 
         return public_caller_api
-
 
 class SlaveProxy(threading.Thread):
     def __init__(self, ros_hostname, private_caller_api, real_master_uri):
@@ -225,35 +221,36 @@ class SlaveProxy(threading.Thread):
             # reroute URIs which are inside containers, and add any needed iptables rules so
             # that the remapped URIs get to the right place
             if func_name == 'getMasterURI':
-                return SUCCESS, '', self._real_master_uri
+                return ROS_SUCCESS, '', self._real_master_uri
+            elif func_name == 
             elif func_name == 'requestTopic':
                 (code, statusMessage, protocolParams) = getattr(self._node_xmlrpc_client(*func_args))
-                if code != SUCCESS:
-                    return (code, statusMessage, protocolParams)
+                if code != ROS_SUCCESS:
+                    return (code, statusMessage, [])
                 
                 ros_proto_id, container_ip, private_port = protocolParams
                 if ros_proto_id != 'TCPROS':
                     print 'Error: Protocol is not TCPROS: %s' % ros_proto_id
-                    return FAILURE, 'Unsupported protocol for docker proxy: %s' % (ros_proto_id,), []
+                    return ROS_FAILURE, 'Unsupported protocol for docker proxy: %s' % (ros_proto_id,), []
                 
                 # forward this port to the container, and return the public address:port
                 host_port = self._rerouter(container_ip, private_port, 'tcp')
-                return (code, statusMessage, (ros_proto_id, self._ros_hostname, host_port)
+                return (code, statusMessage, (ros_proto_id, self._ros_hostname, host_port))
                 
             result = real_master_func(*func_args)
+            print 'Fixed input: %s%s' % (func_name, func_args)
+            return result
         except Exception as e:
             print 'ERROR: %s' % str(e)
             raise
-
-        print 'Fixed input: %s%s' % (func_name, func_args)
-
+            
+if __name__ == '__main__':        
+    fake_master_port = int(sys.argv[1])
+    real_master_uri = sys.argv[2]
+    host_ip = sys.argv[3]
     
-fake_master_port = int(sys.argv[1])
-real_master_uri = sys.argv[2]
-host_ip = sys.argv[3]
-
-server = SimpleXMLRPCServer(('0.0.0.0', fake_master_port), logRequests=False)
-server.register_introspection_functions()
-server.register_multicall_functions()
-server.register_instance(MasterProxy(real_master_uri, host_ip))
-server.serve_forever()
+    server = SimpleXMLRPCServer(('0.0.0.0', fake_master_port), logRequests=False)
+    server.register_introspection_functions()
+    server.register_multicall_functions()
+    server.register_instance(MasterProxy(real_master_uri, host_ip))
+    server.serve_forever()
